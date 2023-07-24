@@ -1,6 +1,8 @@
 using RandomFeaturePotentials
 using Test
+using Plots
 
 @testset "RandomFeaturePotentials.jl" begin
-    # Write your tests here.
+    include("similarity_kernels.jl")
+    include("descriptors.jl")
 end
