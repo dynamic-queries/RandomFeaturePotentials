@@ -3,11 +3,13 @@ module RandomFeaturePotentials
     using NPZ
     using Lux
     using Optimisers
-    using CUDA
     using SparseArrays
     using LowRankApprox
     using Distributions
     using Statistics
+    using StatsBase
+    using Zygote
+    
 
     include("similarity_kernels.jl")
     include("descriptors.jl")
