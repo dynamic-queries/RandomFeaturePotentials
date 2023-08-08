@@ -168,7 +168,7 @@ function (snn::SamplingNN)(xtrain, ytrain, heuristic::typeof(AbstractSimpleHeuri
     res = snn.density_resolution
 
     # Evaluate sampling density
-    ρ_res = floor(Int,res*m)
+    ρ_res = floor(Int,res*snn.layers[1])
     idxs_1 = sample(snn.rng, 1:m, ρ_res, replace=true)
     idxs_2 = sample(snn.rng, 1:m, ρ_res, replace=true)
     xsample1 = xtrain[:,idxs_1]
