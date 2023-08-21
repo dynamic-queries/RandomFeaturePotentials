@@ -8,7 +8,6 @@ using LinearAlgebra
 using BenchmarkTools
 using FFTW
 using StatsBase
-using TotalLeastSquares
 
 abstract type AbstractApproximator end
 
@@ -27,7 +26,7 @@ end
 function (nn::NN)(xtrain::AbstractArray, ytrain::AbstractArray)
 
     # Get device
-    device = gpu_device()
+    # device =  gpu_device()
 
     # Define models
     rng = Random.Xoshiro(99)
@@ -35,9 +34,9 @@ function (nn::NN)(xtrain::AbstractArray, ytrain::AbstractArray)
         Dense(dims_in=>layers[1],tanh),
         Dense(layers[1]=>dims_out,identity)
     )
-    parameters, state = Lux.setup(rng, model) .|> device
-    xtrain = xtrain .|> device
-    ytrain = ytrain .|> device
+    parameters, state = Lux.setup(rng, model) #.|> device
+    xtrain = xtrain #.|> device
+    ytrain = ytrain #.|> device
 
     # Evaluate once
     val, st  = model(xtrain, parameters, state)
@@ -90,7 +89,7 @@ begin
 
     f2 = plot(loss_history,yaxis=:log,title="Loss evolution",xlabel="Iterations", ylabel="Loss (log)", label=false)
     plot(f1,f2,size=(700,500))
-    savefig("test/approx_test/single_output.svg")
+    savefig("RandomFeaturePotentials/test/approx_test/single_output.svg")
 end
 
 begin
@@ -113,89 +112,152 @@ begin
 
     f2 = plot(loss_history,yaxis=:log,title="Loss evolution",xlabel="Iterations", ylabel="Loss (log)", label=false)
     plot(f1,f2,size=(1000,500))
-    savefig("test/approx_test/multi_output.svg")
+    savefig("RandomFeaturePotentials/test/approx_test/multi_output.svg")
 end
 
-abstract type AbstractSimpleHeuristic end
+# Models for the features in the neural network -- W,b
+abstract type AbstractFeatureModel end
 
-struct Uniform <: AbstractSimpleHeuristic end
+struct LinearFeatureModel <: AbstractFeatureModel 
+    s1::Float64
+    s2::Float64
+    W::Any
+    b::Any
 
-function (un::Uniform)(xsample1, ysample1, xsample2, ysample2)
-    N = size(xsample1,2)
-    return (1/N)*ones(N)
+    function LinearFeatureModel(s1,s2)
+        new(s1,s2,nothing,nothing)
+    end
+end
+
+function (model::LinearFeatureModel)(rng, xtrain, idxs, ρ, K)
+    W(x1,x2) = model.s1*(x1-x2)/norm(x1-x2)
+    b(x1,x2) = ((x1-x2)/norm(x1-x2))' * x1 + model.s2
+    
+    M = size(xtrain)[end]
+    nsamples = K
+    idx_from = wsample(rng, idxs, nsamples, Weights(ρ), replace=false)
+    idx_to = wsample(rng, idxs, nsamples, Weights(ρ), replace=false)
+    W1 = []
+    b1 = []
+    for i=1:K
+        k1 = xtrain[:,idx_from[i]]
+        k2 = xtrain[:,idx_to[i]]
+        if k1!=k2
+            push!(W1,W(k1,k2))
+            push!(b1,b(k1,k2))
+        end
+    end 
+    model.W = reduce(hcat, W1)'
+    model.b = b1
+    return model.W, model.b
+end
+
+# Heuristics for sampling density
+abstract type AbstractHeuristic end
+struct Uniform <: AbstractHeuristic end
+struct FiniteDifference <: AbstractHeuristic end
+struct FullDerivative <: AbstractHeuristic end
+struct RandomDerivative <: AbstractHeuristic end
+
+function (heuristic::Uniform)(xtrain,  ytrain, Nl, multiplicity)
+    M = size(xtrain)[end]
+    nsamples = Nl*multiplicity
+    idx = sample(1:M, nsamples)
+    ρ = (1/nsamples)*ones(nsamples)
+    return idx, ρ
 end 
 
-struct DiscreteDerivative <: AbstractSimpleHeuristic end 
-function (dd::DiscreteDerivative)(xsample1, ysample1, xsample2, ysample2)
-    num = ysample2 .- ysample1 
-    den = xsample2 .- xsample1
-    ρ  = map(norm, eachslice(num, dims=2)) ./ (map(norm, eachslice(den, dims=2)) .+ 1e-8)
-    return ρ
+function (heuristic::FiniteDifference)(xtrain, ytrain, Nl, multiplicity)
+    M = size(xtrain)[end]
+    nsamples = Nl*multiplicity
+    idx_from = sample(1:M, nsamples)
+    idx_to = sample(1:M, nsamples)
+    num = ytrain[:,idx_to] .- ytrain[:,idx_from]
+    den = xtrain[:,idx_to] .- xtrain[:,idx_from]
+    ϵ = 1e-8
+    ρ = map(norm, eachslice(num, dims=2)) / (map(norm, eachslice(den, dims=2))+ϵ)
+    return idx_from,ρ
+end
+
+function (heuristic::FullDerivative)(xtrain, ytrain, Nl, multiplicity)
+    M = size(xtrain)[end]
+    num = diff(ytrain,dims=2)
+    den = diff(xtrain,dims=2)
+    ϵ = 1e-8
+    ρ = map(norm, eachslice(num, dims=2)) / (map(norm, eachslice(den, dims=2))+ϵ)
+    idx = 1:M-1
+    return idx,ρ
 end 
 
-struct DiscreteFourierDerivative <: AbstractSimpleHeuristic end
-function (dd::DiscreteFourierDerivative)(xsample1, ysample1, xsample2, ysample2)
-    num = fftshift(fft(ysample2 .- ysample1)) 
-    den = fftshift(fft(xsample2 .- xsample1))
-    ρ  = map(norm, eachslice(num, dims=2)) ./ (map(norm, eachslice(den, dims=2)) .+ 1e-8)
-    return ρ
+function (heuristic::RandomDerivative)(xtrain, ytrain, Nl, multiplicity)
+    M = size(xtrain)[end]
+    nsamples = Nl*multiplicity
+    idx_from = sample(1:M, nsamples)
+    idx_to = mod.(idx_from .+ 1,M)
+    num = ytrain[:,idx_to] .- ytrain[:,idx_from]
+    den = xtrain[:,idx_to] .- xtrain[:,idx_from]
+    ϵ = 1e-8
+    ρ = map(norm, eachslice(num, dims=2)) / (map(norm, eachslice(den, dims=2))+ϵ)
+    return idx_from,ρ
 end 
 
+# 
 struct SamplingNN <: AbstractApproximator
     rng
     dims_in::Int
     dims_out::Int
     layers::Vector
-    density_resolution::Float64
-    s1::Float64
-    s2::Float64
-
-    W::AbstractArray
-    b::AbstractArray
+    multiplicity::Int
+    feature_model::AbstractFeatureModel
     activation
 
-    function SamplingNN(dims_in, dims_out, layers, s1, s2, res=2, activation=tanh)
+    function SamplingNN(dims_in, dims_out, layers, feature_model; multiplicity=2, activation=tanh)
         rng = Xoshiro(0)
-        W = zeros(layers[1], dims_in)
-        b = zeros(layers[1])
-        new(rng, dims_in, dims_out, layers, res, s1, s2, W, b, activation)
+        new(rng, dims_in, dims_out, layers, multiplicity, feature_model, activation)
     end 
 end
 
-function (snn::SamplingNN)(xtrain, ytrain, heuristic::typeof(AbstractSimpleHeuristic))
-    _, m = size(xtrain)
-    num_neurons = snn.layers[1]
-    res = snn.density_resolution
-
+function (snn::SamplingNN)(xtrain, ytrain, heuristic::typeof(AbstractHeuristic),λ;atol=1e-12,optimize=false)
     # Evaluate sampling density
-    ρ_res = floor(Int,res*snn.layers[1])
-    idxs_1 = sample(snn.rng, 1:m, ρ_res, replace=true)
-    idxs_2 = sample(snn.rng, 1:m, ρ_res, replace=true)
-    xsample1 = xtrain[:,idxs_1]
-    ysample1 = ytrain[:,idxs_1]
-    xsample2 = xtrain[:,idxs_2]
-    ysample2 = ytrain[:,idxs_2]
+    M = size(xtrain)[end]
+    Nl = snn.layers[1]
     H = heuristic()
-    ρ = H(xsample1, ysample1, xsample2, ysample2)
+    idxs,ρ = H(xtrain, ytrain, Nl, snn.multiplicity)
 
-    # Assemble weights
-    eval_idxs_1 = sample(snn.rng, 1:m, Weights(ρ), num_neurons, replace=true)
-    eval_idxs_2 = sample(snn.rng, 1:m, Weights(ρ), num_neurons, replace=true)
-    temp = xtrain[:,eval_idxs_1]' - xtrain[:,eval_idxs_2]'
-    snn.W .= snn.s1 .* (temp / ((norm(temp) + 1e-8))^2)
-    snn.b .= (snn.s2 .+ snn.W .* xtrain[:,eval_idxs_1]')[:]
+    # Sample weights and biases
+    W,b = snn.feature_model(snn.rng, xtrain, idxs, ρ, Nl)
 
-    # Setup linear layer
-    ϕ = snn.activation.(snn.W*xtrain .+ snn.b)
+    # Solve for coefficients of last layer
+    bases = activation.(W*xtrain .+ b)'
+    if M<1000 || ~optimize
+        coeff = pinv(bases,atol=λ)*ytrain
+    else
+        coeff,stats = Krylov.lslq(bases,ytrain,λ=λ,atol=atol)
+    end  # size(coeff) = K, output_dims 
 
-    # Total least squares
-    @show cond(ϕ')
-    W1 = (pinv(ϕ')*ytrain')'
+    # Setup model
+    model = x -> (coeff' * activation.(W1*x .+ b1))
 
-    # Model
-    model = x-> W1*(snn.activation.(snn.W * x .+ snn.b))
     return model
 end
+
+
+N = 100
+x = LinRange(0.0,2π,N)
+y = sin.(x)
+dims_in = dims_out = 1
+layers = [20]
+res = 1.0
+xtrain = reshape(x,(dims_in,:))
+ytrain = reshape(y,(dims_out,:))
+heuristic = Uniform
+λ = 1e-12
+s2 = log(1.5)
+s1 = 2*s2
+f_model = LinearFeatureModel(s1,s2)
+snn = SamplingNN(dims_in,dims_out,layers,f_model,multiplicity=5,activation=tanh)
+model = snn(xtrain, ytrain, heuristic, λ,atol=1e-9,optimize=false)
+
 
 begin
     N = 100

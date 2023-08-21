@@ -48,7 +48,7 @@ struct CoulombMatrix <: GraphKernel
     f::Function
     
     function CoulombMatrix(R,Z,α=0.24)
-        f = (r,z1,z2) -> (z1*z2)^α *(!(r==0) ? (1/r)^2 : 1.0)
+        f = (r,z1,z2) -> (z1*z2)^α *(!(r<1e-4) ? (1/r)^2 : 1.0)
         new(R,Z,α,f)
     end
     
@@ -75,7 +75,7 @@ struct GDMLKernel <: GraphKernel
     f::Function
     
     function GDMLKernel(R,Z,α=0.24)
-        f = (r,z1,z2) -> (z1*z2)^α * (!(r==0) ? (1/r) : 1.0)
+        f = (r,z1,z2) -> (z1*z2)^α * (!(r<1e-40) ? (1/r) : 1.0)
         new(R,Z,α,f)
     end
 

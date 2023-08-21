@@ -9,6 +9,8 @@ module RandomFeaturePotentials
     using Statistics
     using StatsBase
     using Zygote
+    using Random
+    using RegularizationTools
     
 
     include("similarity_kernels.jl")
