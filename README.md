@@ -1,5 +1,11 @@
 ### RandomFeaturePotentials
+Fits potential energy surfaces of different molecules, materials using [Random feature models](https://arxiv.org/abs/2005.10224).
 
+The support for RFMs are randomly sampled along the input domain. Here's RFMs in action for a two-output sinusoidal function, initially sampled uniformly and in the second case with weighted sampling.
+
+![](https://github.com/dynamic-queries/RandomFeaturePotentials/blob/main/test/approx_test/Uniform_multiple_sampling.svg)
+
+![](https://github.com/dynamic-queries/RandomFeaturePotentials/blob/main/test/approx_test/FiniteDifference_multiple_sampling.svg)
 #### Literature
 
 ##### Covariance Kernels
