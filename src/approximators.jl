@@ -58,11 +58,9 @@ function (nn::NN)(xtrain::AbstractArray, ytrain::AbstractArray)
     return (model, parameters, state), loss_history
 end 
 
-
-# Models for the features in the neural network -- W,b
 abstract type AbstractFeatureModel end
 
-struct LinearFeatureModel <: AbstractFeatureModel 
+mutable struct LinearFeatureModel <: AbstractFeatureModel 
     s1::Float64
     s2::Float64
     W::Any
@@ -74,13 +72,14 @@ struct LinearFeatureModel <: AbstractFeatureModel
 end
 
 function (model::LinearFeatureModel)(rng, xtrain, idxs, ρ, K)
-    W(x1,x2) = model.s1*(x1-x2)/norm(x1-x2)
-    b(x1,x2) = ((x1-x2)/norm(x1-x2))' * x1 + model.s2
+    W(x1,x2) = model.s1*(x1-x2)/norm(x1-x2).^2
+    b(x1,x2) = ((x1-x2)/(norm(x1-x2)).^2)' * x1 + model.s2
     
-    M = size(xtrain)[end]
     nsamples = K
-    idx_from = sample(rng, idxs, nsamples, Weights(ρ), replace=false)
-    idx_to = sample(rng, idxs, nsamples, Weights(ρ), replace=false)
+    L = length(ρ)
+    idx = wsample(rng, 1:L, Weights(ρ), nsamples, replace=false)
+    idx_from = idxs[1][idx]
+    idx_to = idxs[2][idx]
     W1 = []
     b1 = []
     for i=1:K
@@ -106,9 +105,10 @@ struct RandomDerivative <: AbstractHeuristic end
 function (heuristic::Uniform)(xtrain,  ytrain, Nl, multiplicity)
     M = size(xtrain)[end]
     nsamples = Nl*multiplicity
-    idx = sample(1:M, nsamples, replace=true)
+    idx_from = sample(1:M, nsamples,replace=true)
+    idx_to = sample(1:M, nsamples,replace=true)
     ρ = (1/nsamples)*ones(nsamples)
-    return idx, ρ
+    return [idx_from, idx_to], ρ
 end 
 
 function (heuristic::FiniteDifference)(xtrain, ytrain, Nl, multiplicity)
@@ -119,8 +119,8 @@ function (heuristic::FiniteDifference)(xtrain, ytrain, Nl, multiplicity)
     num = ytrain[:,idx_to] .- ytrain[:,idx_from]
     den = xtrain[:,idx_to] .- xtrain[:,idx_from]
     ϵ = 1e-8
-    ρ = map(norm, eachslice(num, dims=2)) / (map(norm, eachslice(den, dims=2))+ϵ)
-    return idx_from,ρ
+    ρ = map(norm, eachslice(num, dims=2)) ./ (map(norm, eachslice(den, dims=2)).+ϵ)
+    return [idx_from, idx_to],ρ
 end
 
 function (heuristic::FullDerivative)(xtrain, ytrain, Nl, multiplicity)
@@ -128,21 +128,22 @@ function (heuristic::FullDerivative)(xtrain, ytrain, Nl, multiplicity)
     num = diff(ytrain,dims=2)
     den = diff(xtrain,dims=2)
     ϵ = 1e-8
-    ρ = map(norm, eachslice(num, dims=2)) / (map(norm, eachslice(den, dims=2))+ϵ)
-    idx = 1:M-1
-    return idx,ρ
+    ρ = map(norm, eachslice(num, dims=2)) ./ (map(norm, eachslice(den, dims=2)).+ϵ)
+    idx1 = 1:M-1
+    idx2 = 2:M
+    return [idx1, idx2],ρ
 end 
 
 function (heuristic::RandomDerivative)(xtrain, ytrain, Nl, multiplicity)
     M = size(xtrain)[end]
     nsamples = Nl*multiplicity
     idx_from = sample(1:M, nsamples, replace=true)
-    idx_to = mod.(idx_from .+ 1,M)
+    idx_to = mod.(idx_from .+ 1, M).+1
     num = ytrain[:,idx_to] .- ytrain[:,idx_from]
     den = xtrain[:,idx_to] .- xtrain[:,idx_from]
     ϵ = 1e-8
-    ρ = map(norm, eachslice(num, dims=2)) / (map(norm, eachslice(den, dims=2))+ϵ)
-    return idx_from,ρ
+    ρ = map(norm, eachslice(num, dims=2)) ./ (map(norm, eachslice(den, dims=2)) .+ϵ)
+    return [idx_from, idx_to],ρ
 end 
 
 # 
@@ -155,13 +156,13 @@ struct SamplingNN <: AbstractApproximator
     feature_model::AbstractFeatureModel
     activation
 
-    function SamplingNN(dims_in, dims_out, layers, feature_model, multiplicity=2, activation=tanh)
+    function SamplingNN(dims_in, dims_out, layers, feature_model; multiplicity=1, activation=tanh)
         rng = Xoshiro(0)
         new(rng, dims_in, dims_out, layers, multiplicity, feature_model, activation)
     end 
 end
 
-function (snn::SamplingNN)(xtrain, ytrain, heuristic::typeof(AbstractSimpleHeuristic),λ,atol=1e-12,optimize=false)
+function (snn::SamplingNN)(xtrain, ytrain, heuristic::typeof(AbstractHeuristic),λ;atol=1e-12,optimize=false)
     # Evaluate sampling density
     M = size(xtrain)[end]
     Nl = snn.layers[1]
@@ -172,19 +173,18 @@ function (snn::SamplingNN)(xtrain, ytrain, heuristic::typeof(AbstractSimpleHeuri
     W,b = snn.feature_model(snn.rng, xtrain, idxs, ρ, Nl)
 
     # Solve for coefficients of last layer
-    bases = activation.(W*xtrain .+ b)'
-    
-    
-    # Optimize for the coefficients
-    
-    if M<1000 || ~optimize
-        coeff = pinv(bases,atol=λ)*ytrain
+    bases = snn.activation.(W*xtrain .+ b)'
+    @show cond(bases)
+    if optimize==false
+        coeff = pinv(bases,atol=λ)*ytrain'
     else
-        coeff,stats = Krylov.lslq(bases,ytrain,λ=λ,atol=atol)
+        r = size(ytrain,1)
+        coeff,stats = Krylov.lslq(Array(bases),Array(ytrain'[:]),λ=λ,atol=atol)
+        coeff = reshape(coeff,r,:)'
     end  # size(coeff) = K, output_dims 
 
     # Setup model
-    model = x -> (coeff' * activation.(W1*x .+ b1))
+    model = x -> (coeff' * snn.activation.(snn.feature_model.W*x .+ snn.feature_model.b))
 
     return model
 end

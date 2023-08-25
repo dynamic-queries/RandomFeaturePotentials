@@ -11,6 +11,7 @@ module RandomFeaturePotentials
     using Zygote
     using Random
     using RegularizationTools
+    using Krylov
     
 
     include("similarity_kernels.jl")

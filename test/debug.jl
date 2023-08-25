@@ -6,9 +6,16 @@ using Zygote
 using Statistics
 using Random
 using LinearAlgebra
+using ForwardDiff
 using BenchmarkTools
 using FFTW
+using Optimization
+using OptimizationOptimJL
+using Krylov
+using CUDA
 using StatsBase
+using BenchmarkTools
+ENV["GKSwstype"] = "100"
 
 abstract type AbstractApproximator end
 
@@ -116,7 +123,7 @@ struct SamplingNN <: AbstractApproximator
     end 
 end
 
-function (snn::SamplingNN)(xtrain, ytrain, heuristic::typeof(AbstractHeuristic),λ;atol=1e-12,optimize=false)
+function (snn::SamplingNN)(xtrain, ytrain, heuristic::typeof(AbstractHeuristic),λ;atol=1e-12,optimize=false,CustomArray=Array)
     # Evaluate sampling density
     M = size(xtrain)[end]
     Nl = snn.layers[1]
@@ -126,189 +133,218 @@ function (snn::SamplingNN)(xtrain, ytrain, heuristic::typeof(AbstractHeuristic),
     # Sample weights and biases
     W,b = snn.feature_model(snn.rng, xtrain, idxs, ρ, Nl)
 
+    W = CustomArray(W)
+    b = CustomArray(b)
     # Solve for coefficients of last layer
-    bases = snn.activation.(W*xtrain .+ b)'
+    bases = CustomArray(snn.activation.(W*xtrain .+ b)')
     @show cond(bases)
     if M<1000 || ~optimize
-        coeff = pinv(bases,atol=λ)*ytrain'
+        coeff = pinv(bases,atol=λ)*CustomArray(ytrain')
     else
-        coeff,stats = Krylov.lslq(bases,ytrain',λ=λ,atol=atol)
+        coeff,stats = Krylov.lsqr(Array(bases),Array(ytrain')[:],λ=λ,atol=atol)
     end  # size(coeff) = K, output_dims 
 
     # Setup model
-    model = x -> (coeff' * snn.activation.(snn.feature_model.W*x .+ snn.feature_model.b))
-
+    model = x -> (coeff' * snn.activation.(W*x .+ b))
     return model
 end
 
-# Examples
-begin
-    begin # Preamble
-        N = 100
-        x = LinRange(0.0,2π,N)
-        y = sin.(4*x)
-        dims_in = dims_out = 1
-        layers = [20]
-        res = 1.0
-        xtrain = reshape(x,(dims_in,:))
-        ytrain = reshape(y,(dims_out,:))
-        λ = 1e-12
-        s2 = log(1.5)
-        s1 = 2*s2
-        f_model = LinearFeatureModel(s1,s2)
+# # Examples
+# begin
+#     begin # Preamble
+#         N = 100
+#         x = LinRange(0.0,2π,N)
+#         y = sin.(4*x)
+#         dims_in = dims_out = 1
+#         layers = [20]
+#         res = 1.0
+#         xtrain = reshape(x,(dims_in,:))
+#         ytrain = reshape(y,(dims_out,:))
+#         λ = 1e-12
+#         s2 = log(1.5)
+#         s1 = 2*s2
+#         f_model = LinearFeatureModel(s1,s2)
 
-        snn = SamplingNN(dims_in,dims_out,layers,f_model,multiplicity=2,activation=tanh)
-        M = size(xtrain)[end]
-        Nl = snn.layers[1]
-        nothing
-    end 
+#         snn = SamplingNN(dims_in,dims_out,layers,f_model,multiplicity=2,activation=tanh)
+#         M = size(xtrain)[end]
+#         Nl = snn.layers[1]
+#         nothing
+#     end 
 
-    begin
-        heuristic = Uniform
-        H = heuristic()
-        idxs,ρ = H(xtrain, ytrain, Nl, snn.multiplicity)
-        f1 = plot(ρ,ylabel="ρ",title="Uniform sampling",legend=false,gridlinewidth=2.0,linewidth=0.5)
-        display(f1)
-        savefig("RandomFeaturePotentials/test/approx_test/Uniform.svg")
+#     begin
+#         heuristic = Uniform
+#         H = heuristic()
+#         idxs,ρ = H(xtrain, ytrain, Nl, snn.multiplicity)
+#         f1 = plot(ρ,ylabel="ρ",title="Uniform sampling",legend=false,gridlinewidth=2.0,linewidth=0.5)
+#         display(f1)
+#         savefig("test/approx_test/Uniform.svg")
 
-        heuristic = FiniteDifference
-        H = heuristic()
-        idxs,ρ = H(xtrain, ytrain, Nl, snn.multiplicity)
-        f1 = plot(ρ,ylabel="ρ",title="FD",legend=false,gridlinewidth=2.0,linewidth=0.5)
-        display(f1)
-        savefig("RandomFeaturePotentials/test/approx_test/FD.svg")
-
-
-        heuristic = FullDerivative
-        H = heuristic()
-        idxs,ρ = H(xtrain, ytrain, Nl, snn.multiplicity)
-        f1 = plot(ρ,ylabel="ρ",title="Derivative",legend=false,gridlinewidth=2.0,linewidth=0.5)
-        display(f1)
-        savefig("RandomFeaturePotentials/test/approx_test/FullDerivative.svg")
+#         heuristic = FiniteDifference
+#         H = heuristic()
+#         idxs,ρ = H(xtrain, ytrain, Nl, snn.multiplicity)
+#         f1 = plot(ρ,ylabel="ρ",title="FD",legend=false,gridlinewidth=2.0,linewidth=0.5)
+#         display(f1)
+#         savefig("test/approx_test/FD.svg")
 
 
-        heuristic = RandomDerivative
-        H = heuristic()
-        idxs,ρ = H(xtrain, ytrain, Nl, snn.multiplicity)
-        f1 = plot(ρ,ylabel="ρ",title="Random sampled derivative",legend=false,gridlinewidth=2.0,linewidth=0.5)
-        display(f1)
-        savefig("RandomFeaturePotentials/test/approx_test/RandomDerivative.svg")
-    end
-
-    begin
-        layers = [20]
-        λ = 1e-15
-        heuristic = Uniform
-        model = snn(xtrain,ytrain,heuristic,λ,atol=1e-8,optimize=false)
-        test_data = xtrain
-        ypred = model(test_data)
-        f1 = plot(xtrain[:], ytrain[:], gridwidth=2.0,label="Ground truth")
-        scatter!(xtrain[:], ypred[:], ms=2.0, label="Prediction from network", title="Sampling neural network - US")
-
-        f2 = plot(1:size(ytrain,2),ytrain[:]-ypred[:],title="Error",label=false,gridwidth=2.0)
-
-        fig = plot(f1,f2,size=(1000,300))
-        display(fig)
-        savefig("RandomFeaturePotentials/test/approx_test/Uniform_single_sampling.svg")
-        savefig("RandomFeaturePotentials/test/approx_test/test.png")
-    end
-
-    begin
-        layers = [20]
-        λ = 1e-15
-        heuristic = FiniteDifference
-        model = snn(xtrain,ytrain,heuristic,λ,atol=1e-8,optimize=false)
-        test_data = xtrain
-        ypred = model(test_data)
-        f1 = plot(xtrain[:], ytrain[:], gridwidth=2.0,label="Ground truth")
-        scatter!(xtrain[:], ypred[:], ms=2.0, label="Prediction from network", title="Sampling neural network - FD")
-
-        f2 = plot(1:size(ytrain,2),ytrain[:]-ypred[:],title="Error",label=false,gridwidth=2.0)
-
-        fig = plot(f1,f2,size=(1000,300))
-        display(fig)
-        savefig("RandomFeaturePotentials/test/approx_test/FiniteDifference_single_sampling.svg")
-        savefig("RandomFeaturePotentials/test/approx_test/test.png")
-    end
-end 
+#         heuristic = FullDerivative
+#         H = heuristic()
+#         idxs,ρ = H(xtrain, ytrain, Nl, snn.multiplicity)
+#         f1 = plot(ρ,ylabel="ρ",title="Derivative",legend=false,gridlinewidth=2.0,linewidth=0.5)
+#         display(f1)
+#         savefig("test/approx_test/FullDerivative.svg")
 
 
-begin
-    begin # Preamble
-        N = 100
-        x = LinRange(0.0,2π,N)
-        y = sin.(4*x)
-        z = sin.(2*x) .* cos.(4*x)
+#         heuristic = RandomDerivative
+#         H = heuristic()
+#         idxs,ρ = H(xtrain, ytrain, Nl, snn.multiplicity)
+#         f1 = plot(ρ,ylabel="ρ",title="Random sampled derivative",legend=false,gridlinewidth=2.0,linewidth=0.5)
+#         display(f1)
+#         savefig("test/approx_test/RandomDerivative.svg")
+#     end
 
-        dims_in = 1
-        dims_out = 2
-        layers = [100]
-        res = 1.0
-        xtrain = reshape(x,(dims_in,:))
-        ytrain = reshape(hcat(y,z)',(dims_out,:))
-        λ = 1e-12
-        s2 = log(1.5)
-        s1 = 2*s2
-        f_model = LinearFeatureModel(s1,s2)
+#     begin
+#         layers = [20]
+#         λ = 1e-15
+#         heuristic = Uniform
+#         model = snn(xtrain,ytrain,heuristic,λ,atol=1e-8,optimize=false)
+#         test_data = xtrain
+#         ypred = model(test_data)
+#         f1 = plot(xtrain[:], ytrain[:], gridwidth=2.0,label="Ground truth")
+#         scatter!(xtrain[:], ypred[:], ms=2.0, label="Prediction from network", title="Sampling neural network - US")
 
-        snn = SamplingNN(dims_in,dims_out,layers,f_model,multiplicity=5,activation=tanh)
-        M = size(xtrain)[end]
-        Nl = snn.layers[1]
-        nothing
-    end 
+#         f2 = plot(1:size(ytrain,2),ytrain[:]-ypred[:],title="Error",label=false,gridwidth=2.0)
 
-    begin
-        heuristic = Uniform
-        H = heuristic()
-        idxs,ρ = H(xtrain, ytrain, Nl, snn.multiplicity)
-        f1 = plot(ρ,ylabel="ρ",title="Uniform sampling",legend=false,gridlinewidth=2.0,linewidth=0.5)
-        display(f1)
-        savefig("RandomFeaturePotentials/test/approx_test/Uniform.svg")
+#         fig = plot(f1,f2,size=(1000,300))
+#         display(fig)
+#         savefig("test/approx_test/Uniform_single_sampling.svg")
+#         savefig("test/approx_test/test.png")
+#     end
 
-        heuristic = FiniteDifference
-        H = heuristic()
-        idxs,ρ = H(xtrain, ytrain, Nl, snn.multiplicity)
-        f1 = plot(ρ,ylabel="ρ",title="FD",legend=false,gridlinewidth=2.0,linewidth=0.5)
-        display(f1)
-        savefig("RandomFeaturePotentials/test/approx_test/FD.svg")
-    end
+#     begin
+#         layers = [20]
+#         λ = 1e-15
+#         heuristic = FiniteDifference
+#         model = snn(xtrain,ytrain,heuristic,λ,atol=1e-8,optimize=false)
+#         test_data = xtrain
+#         ypred = model(test_data)
+#         f1 = plot(xtrain[:], ytrain[:], gridwidth=2.0,label="Ground truth")
+#         scatter!(xtrain[:], ypred[:], ms=2.0, label="Prediction from network", title="Sampling neural network - FD")
 
-    begin
-        λ = 1e-14
-        heuristic = Uniform
-        model = snn(xtrain,ytrain,heuristic,λ,atol=1e-14,optimize=false)
-        test_data = xtrain
-        ypred = model(test_data)
-        f1 = plot(xtrain[:], ytrain[1,:], gridwidth=2.0,label="Ground truth")
-        scatter!(xtrain[:], ypred[1,:], ms=2.0, label="Prediction from network", title="Sampling neural network - US")
-        plot!(xtrain[:], ytrain[2,:], gridwidth=2.0,legend=false)
-        scatter!(xtrain[:], ypred[2,:], ms=2.0)
+#         f2 = plot(1:size(ytrain,2),ytrain[:]-ypred[:],title="Error",label=false,gridwidth=2.0)
+
+#         fig = plot(f1,f2,size=(1000,300))
+#         display(fig)
+#         savefig("test/approx_test/FiniteDifference_single_sampling.svg")
+#         savefig("test/approx_test/test.png")
+#     end
+# end 
 
 
-        f2 = plot(1:length(ytrain[:]),ytrain[:]-ypred[:],title="Error",label=false,gridwidth=2.0)
+# begin
+#     begin # Preamble
+#         N = 100
+#         x = LinRange(0.0,2π,N)
+#         y = sin.(4*x)
+#         z = sin.(2*x) .* cos.(4*x)
 
-        fig = plot(f1,f2,size=(1000,300))
-        display(fig)
-        savefig("RandomFeaturePotentials/test/approx_test/Uniform_multiple_sampling.svg")
-        savefig("RandomFeaturePotentials/test/approx_test/test.png")
-    end
+#         dims_in = 1
+#         dims_out = 2
+#         layers = [100]
+#         res = 1.0
+#         xtrain = reshape(x,(dims_in,:))
+#         ytrain = reshape(hcat(y,z)',(dims_out,:))
+#         λ = 1e-12
+#         s2 = log(1.5)
+#         s1 = 2*s2
+#         f_model = LinearFeatureModel(s1,s2)
 
-    begin
-        λ = 1e-12
-        heuristic = FiniteDifference
-        model = snn(xtrain,ytrain,heuristic,λ,atol=1e-8,optimize=false)
-        test_data = xtrain
-        ypred = model(test_data)
-        f1 = plot(xtrain[:], ytrain[1,:], gridwidth=2.0,label="Ground truth")
-        scatter!(xtrain[:], ypred[1,:], ms=2.0, label="Prediction from network", title="Sampling neural network - FD")
-        plot!(xtrain[:], ytrain[2,:], gridwidth=2.0,legend=false)
-        scatter!(xtrain[:], ypred[2,:], ms=2.0)
+#         snn = SamplingNN(dims_in,dims_out,layers,f_model,multiplicity=5,activation=tanh)
+#         M = size(xtrain)[end]
+#         Nl = snn.layers[1]
+#         nothing
+#     end 
 
-        f2 = plot(1:length(ytrain[:]),ytrain[:]-ypred[:],title="Error",label=false,gridwidth=2.0)
+#     begin
+#         heuristic = Uniform
+#         H = heuristic()
+#         idxs,ρ = H(xtrain, ytrain, Nl, snn.multiplicity)
+#         f1 = plot(ρ,ylabel="ρ",title="Uniform sampling",legend=false,gridlinewidth=2.0,linewidth=0.5)
+#         display(f1)
+#         savefig("test/approx_test/Uniform.svg")
 
-        fig = plot(f1,f2,size=(1000,300))
-        display(fig)
-        savefig("RandomFeaturePotentials/test/approx_test/FiniteDifference_multiple_sampling.svg")
-        savefig("RandomFeaturePotentials/test/approx_test/test.png")
-    end
-end 
+#         heuristic = FiniteDifference
+#         H = heuristic()
+#         idxs,ρ = H(xtrain, ytrain, Nl, snn.multiplicity)
+#         f1 = plot(ρ,ylabel="ρ",title="FD",legend=false,gridlinewidth=2.0,linewidth=0.5)
+#         display(f1)
+#         savefig("test/approx_test/FD.svg")
+#     end
+
+#     begin
+#         λ = 1e-14
+#         heuristic = Uniform
+#         model = snn(xtrain,ytrain,heuristic,λ,atol=1e-14,optimize=false)
+#         test_data = xtrain
+#         ypred = model(test_data)
+#         f1 = plot(xtrain[:], ytrain[1,:], gridwidth=2.0,label="Ground truth")
+#         scatter!(xtrain[:], ypred[1,:], ms=2.0, label="Prediction from network", title="Sampling neural network - US")
+#         plot!(xtrain[:], ytrain[2,:], gridwidth=2.0,legend=false)
+#         scatter!(xtrain[:], ypred[2,:], ms=2.0)
+
+
+#         f2 = plot(1:length(ytrain[:]),ytrain[:]-ypred[:],title="Error",label=false,gridwidth=2.0)
+
+#         fig = plot(f1,f2,size=(1000,300))
+#         display(fig)
+#         savefig("test/approx_test/Uniform_multiple_sampling.svg")
+#         savefig("test/approx_test/test.png")
+#     end
+
+#     begin
+#         λ = 1e-14
+#         heuristic = FiniteDifference
+#         model = snn(xtrain,ytrain,heuristic,λ,atol=1e-8,optimize=false)
+#         test_data = xtrain
+#         ypred = model(test_data)
+#         f1 = plot(xtrain[:], ytrain[1,:], gridwidth=2.0,label="Ground truth")
+#         scatter!(xtrain[:], ypred[1,:], ms=2.0, label="Prediction from network", title="Sampling neural network - FD")
+#         plot!(xtrain[:], ytrain[2,:], gridwidth=2.0,legend=false)
+#         scatter!(xtrain[:], ypred[2,:], ms=2.0)
+
+#         f2 = plot(1:length(ytrain[:]),ytrain[:]-ypred[:],title="Error",label=false,gridwidth=2.0)
+
+#         fig = plot(f1,f2,size=(1000,300))
+#         display(fig)
+#         savefig("test/approx_test/FiniteDifference_multiple_sampling.svg")
+#         savefig("test/approx_test/test.png")
+#     end
+# end 
+
+
+# Test GDB dataset
+using MAT
+filename = "../data/QM7/qm7.mat"
+file = matread(filename)
+C = reshape(file["X"],(7165,:))'
+E = file["T"]
+
+dims_in = 529
+dims_out = 1
+layers = [5000]
+res = 1
+λ = 1e-12
+s2 = log(1.5)
+s1 = 2*s2
+f_model = LinearFeatureModel(s1,s2)
+snn = SamplingNN(dims_in,dims_out,layers,f_model,multiplicity=res,activation=tanh)
+heuristic = Uniform
+
+@time model1 = snn(C,E,heuristic,Float32(λ),atol=Float32(1e-8),optimize=true)
+# @btime model2  = snn(C,E,heuristic,λ,atol=1e-8,optimize=true)
+
+Epred = model1(C)
+f1 = plot(E[:],E[:], gridwidth=2.0,label="Ground truth")
+scatter!(E[:], Epred[:], ms=2.0, label="Prediction from network", title="Sampling neural network - US")
+savefig("test/molecule_approx/E_QM7.svg")
+savefig("test/molecule_approx/test.png")
