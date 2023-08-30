@@ -12,6 +12,7 @@ module RandomFeaturePotentials
     using Random
     using RegularizationTools
     using Krylov
+    using CUDA
     
 
     include("similarity_kernels.jl")
@@ -21,10 +22,7 @@ module RandomFeaturePotentials
     include("benchmarks.jl")
 
     export pairwise_displacements
-    export RBFKernel, GDMLKernel, CoulombMatrix, AngularKernel 
+    export RBFKernel, GDMLKernel, CoulombMatrix, DiffusionMap
     export SimpleSimilarityDescriptor, AugmentedSimilarityDescriptor, write
     export Eigenvalues, SingularValues, Eigenfunctions, PrincipalFunctions, DeepSet, CustomSet
-    export normalize, rotate_me_not
-    export make_set
-    export NN, ANN, SNN, ASNN
 end

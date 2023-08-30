@@ -48,7 +48,7 @@ struct CoulombMatrix <: GraphKernel
     f::Function
     
     function CoulombMatrix(R,Z,α=0.24)
-        f = (r,z1,z2) -> (z1*z2)^α *(!(r<1e-4) ? (1/r)^2 : 1.0)
+        f = (r,z1,z2) -> (z1*z2)^α *(!(r<1e-4) ? (1/r) : 1.0)
         new(R,Z,α,f)
     end
     
@@ -75,7 +75,7 @@ struct GDMLKernel <: GraphKernel
     f::Function
     
     function GDMLKernel(R,Z,α=0.24)
-        f = (r,z1,z2) -> (z1*z2)^α * (!(r<1e-40) ? (1/r) : 1.0)
+        f = (r,z1,z2) -> (z1*z2)^α * (!(r<1e-4) ? (1/r) : 1.0)
         new(R,Z,α,f)
     end
 
@@ -93,4 +93,45 @@ function (gk::GDMLKernel)()
         end 
     end 
     return k
+end 
+
+struct DiffusionMap <: GraphKernel
+    R::AbstractArray
+    Z::AbstractArray
+    σ::Float64    
+end 
+
+
+function (Dmap::DiffusionMap)()
+    
+    # Assemble Hankel matrix
+    _, m, d = size(Dmap.R)
+    gaussian(r) = exp((-norm(r)/Dmap.σ)^2)
+    k = zeros(m,m)
+    for i=1:m
+        for j=1:m
+            k[i,j] = gaussian(Dmap.R[i,j,:])
+        end 
+    end 
+
+    # Normalize Hankel matrix
+    incidence = vec(sum(k,dims=2))
+    Incidence = diagm(1 ./ incidence)
+
+    # Kernel matrix
+    Q = Incidence*k*Incidence
+    D = diagm(vec(sum(Q,dims=2)))
+    normalized_Q = D^(-1/2)*Q*D^(-1/2)
+
+    # Evaluate the diffusion coordinates
+    eigvals, eigvecs = eigen(normalized_Q)
+    return eigvecs
+end
+
+struct HigherOrderDiffusionMap <: HypergraphKernel
+
+end 
+
+struct HypergraphLaplacian <: HypergraphKernel
+
 end 

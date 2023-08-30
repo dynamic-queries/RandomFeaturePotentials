@@ -162,7 +162,7 @@ struct SamplingNN <: AbstractApproximator
     end 
 end
 
-function (snn::SamplingNN)(xtrain, ytrain, heuristic::typeof(AbstractHeuristic),λ;atol=1e-12,optimize=false)
+function (snn::SamplingNN)(xtrain, ytrain, heuristic::typeof(AbstractHeuristic),λ;atol=1e-12,optimize=false,device=:gpu)
     # Evaluate sampling density
     M = size(xtrain)[end]
     Nl = snn.layers[1]
@@ -176,7 +176,13 @@ function (snn::SamplingNN)(xtrain, ytrain, heuristic::typeof(AbstractHeuristic),
     bases = snn.activation.(W*xtrain .+ b)'
     @show cond(bases)
     if optimize==false
-        coeff = pinv(bases,atol=λ)*ytrain'
+        if device==:gpu
+            bases = CuArray(bases)
+            y  = CuArray(ytrain')
+            coeff = Array(CUDA.pinv(bases,atol=λ)*y)
+        else
+            coeff = pinv(bases,atol=λ)*ytrain'
+        end 
     else
         r = size(ytrain,1)
         coeff,stats = Krylov.lslq(Array(bases),Array(ytrain'[:]),λ=λ,atol=atol)
@@ -188,3 +194,75 @@ function (snn::SamplingNN)(xtrain, ytrain, heuristic::typeof(AbstractHeuristic),
 
     return model
 end
+
+
+# Conservative systems modeller
+struct SamplingPotential <: AbstractApproximator
+    rng
+    dims_in::Int
+    dims_out::Int
+    layers::Vector
+    multiplicity::Int
+    feature_model::AbstractFeatureModel
+    activation
+    D_activation
+
+    function SamplingPotential(dims_in, dims_out, layers, feature_model; multiplicity=1, activation=tanh, D_activation=x->sech(x)^2)
+        rng = Xoshiro(0)
+        new(rng, dims_in, dims_out, layers, multiplicity, feature_model, activation,D_activation)
+    end 
+end 
+
+function (sp::SamplingPotential)(xtrain, Etrain, Ftrain, heuristic::typeof(AbstractHeuristic), λ; atol=1e-12,optimize=false, sampler=:force)
+    # Evaluate sampling density
+    M = size(xtrain)[end]
+    Nl = snn.layers[1]
+    H = heuristic()
+    d = size(xtrain,1)
+
+    # Sample weights and biases
+    if sampler==:force
+        idxs,ρ = H(xtrain, Ftrain, Nl, snn.multiplicity)
+    elseif sampler ==:energy
+        idxs,ρ = H(xtrain, Etrain, Nl, snn.multiplicity)
+    end 
+    W,b = sp.feature_model(snn.rng, xtrain, idxs, ρ, Nl)
+
+    # Assemble bases
+    E_bases = sp.activation.(W*xtrain .+ b)'
+    F_bases = sp.D_activation.(W*xtrain .+ b)'
+    K = size(W,1)
+    Bases = zeros(d+1,size(E_bases)...)
+    Bases[1,:,:] .= E_bases
+    for j=2:d+1
+       for i=1:K
+            Bases[j,i,:] = W[i,j-1] * F_bases[i,:]
+       end 
+    end 
+    Bases = reshape(permutedims(Bases,(2,1,3)),(K,:))
+    @show cond(Bases)
+
+    # Fit coefficients
+    ytrain = vcat(Etrain, Ftrain)
+
+    if optimize==false
+        coeff = pinv(Bases,atol=λ) * ytrain[:]
+    else 
+        coeff,stats = Krylov.lslq(Bases,ytrain',λ=λ,atol=atol)
+    end 
+
+    energy = x -> (coeff' * sp.activation.(sp.feature_model.W*x .+ sp.feature_model.b))
+    
+    function force(x)
+        K,d = size(snn.feature_model.W)
+        force_bases = zeros(K,d,size(x,2))
+        for i=1:K
+            for j=1:d
+                force_bases[i,j,:] =  sp.D_activation.(sp.feature_model.W*x .+ sp.feature_model.b)[i,:] .* sp.W[i,j]
+            end 
+        end 
+        return reshape(coeff' * reshape(force_bases,(K,:)),(d,m))
+    end
+
+    return energy, force
+end 
